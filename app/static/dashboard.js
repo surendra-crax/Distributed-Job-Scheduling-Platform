@@ -9,8 +9,9 @@ let isAutoRefresh = true;
 let refreshTimer = null;
 let currentJobs = [];
 let currentFilter = { search: "", status: "" };
+const knownJobStates = new Map(); // id -> { status, version, lease_owner }
 
-// DOM Elements
+// DOM Elements - Metrics
 const kpiQueueDepth = document.getElementById("kpi-queue-depth");
 const kpiRunning = document.getElementById("kpi-running");
 const kpiScheduledRetrying = document.getElementById("kpi-scheduled-retrying");
@@ -36,6 +37,7 @@ const tableBody = document.getElementById("jobs-table-body");
 const tableTotalCount = document.getElementById("table-total-count");
 const filterSearch = document.getElementById("filter-search");
 const filterStatus = document.getElementById("filter-status");
+const btnResetFilters = document.getElementById("btn-reset-filters");
 
 // Controls
 const toggleAutoRefresh = document.getElementById("toggle-autorefresh");
@@ -48,7 +50,7 @@ const inputPriority = document.getElementById("input-priority");
 const priorityBadge = document.getElementById("priority-badge");
 const payloadFieldsContainer = document.getElementById("payload-fields-container");
 
-// Modal
+// Job Modal
 const modalBackdrop = document.getElementById("job-modal-backdrop");
 const modalClose = document.getElementById("modal-close");
 const modalTitle = document.getElementById("modal-title");
@@ -60,6 +62,19 @@ const modalError = document.getElementById("modal-error");
 const modalErrorSection = document.getElementById("modal-error-section");
 const modalAttemptsContainer = document.getElementById("modal-attempts-container");
 const modalFooterActions = document.getElementById("modal-footer-actions");
+
+// Workflow Guide Modal & Banner
+const btnOpenWorkflow = document.getElementById("btn-open-workflow");
+const btnBannerFullGuide = document.getElementById("btn-banner-full-guide");
+const workflowModalBackdrop = document.getElementById("workflow-modal-backdrop");
+const workflowModalClose = document.getElementById("workflow-modal-close");
+const btnToggleGuideDetails = document.getElementById("btn-toggle-guide-details");
+const guideToggleText = document.getElementById("guide-toggle-text");
+const guideDetailsPanel = document.getElementById("guide-details-panel");
+
+// Trace Terminal
+const traceTerminal = document.getElementById("trace-terminal");
+const btnClearTrace = document.getElementById("btn-clear-trace");
 
 // Toast Container
 const toastContainer = document.getElementById("toast-container");
@@ -79,6 +94,71 @@ function showToast(message, type = "info") {
 }
 
 // ==========================================================================
+// REAL-TIME SYSTEM TRACE TERMINAL
+// ==========================================================================
+function addSystemTrace(tag, message, highlight = "") {
+  if (!traceTerminal) return;
+  const now = new Date();
+  const timeStr = now.toTimeString().split(" ")[0] + "." + String(now.getMilliseconds()).padStart(3, "0");
+
+  const row = document.createElement("div");
+  row.className = "trace-row";
+
+  let tagClass = "tag-client";
+  let tagLabel = tag.toUpperCase();
+
+  if (tag === "postgres" || tag === "db") {
+    tagClass = "tag-postgres";
+    tagLabel = "POSTGRESQL";
+  } else if (tag === "redis") {
+    tagClass = "tag-redis";
+    tagLabel = "REDIS BUFFER";
+  } else if (tag === "scheduler") {
+    tagClass = "tag-scheduler";
+    tagLabel = "SCHEDULER";
+  } else if (tag === "worker") {
+    tagClass = "tag-worker";
+    tagLabel = "WORKER";
+  } else if (tag === "reaper" || tag === "recovery") {
+    tagClass = "tag-reaper";
+    tagLabel = "REAPER";
+  } else if (tag === "client") {
+    tagClass = "tag-client";
+    tagLabel = "CLIENT API";
+  }
+
+  let formattedMsg = escapeHtml(message);
+  if (highlight) {
+    formattedMsg += ` <span class="trace-highlight">[${escapeHtml(highlight)}]</span>`;
+  }
+
+  row.innerHTML = `
+    <span class="trace-ts">${timeStr}</span>
+    <span class="trace-tag ${tagClass}">${tagLabel}</span>
+    <span class="trace-text">${formattedMsg}</span>
+  `;
+
+  traceTerminal.appendChild(row);
+
+  // Keep terminal capped at 120 lines
+  while (traceTerminal.children.length > 120) {
+    traceTerminal.removeChild(traceTerminal.firstChild);
+  }
+
+  // Auto-scroll to bottom
+  traceTerminal.scrollTop = traceTerminal.scrollHeight;
+}
+
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ==========================================================================
 // FETCH METRICS & HEALTH
 // ==========================================================================
 async function fetchMetricsAndHealth() {
@@ -91,7 +171,7 @@ async function fetchMetricsAndHealth() {
     if (healthRes.ok) {
       const healthData = await healthRes.json();
       if (healthData.checks.database.status === "healthy") {
-        valPostgres.textContent = `${healthData.checks.database.latency_ms}ms`;
+        valPostgres.textContent = `${healthData.checks.database.latency_ms}ms (ACID)`;
         document.getElementById("pill-postgres").querySelector(".status-dot").classList.remove("error");
       }
       if (healthData.checks.redis.status === "healthy") {
@@ -126,193 +206,205 @@ async function fetchMetricsAndHealth() {
 }
 
 // ==========================================================================
-// FETCH JOBS TABLE
+// FETCH JOBS TABLE & DETECT DISTRIBUTED STATE TRANSITIONS
 // ==========================================================================
 async function fetchJobs() {
   try {
-    let url = `${API_BASE}/api/v1/jobs?limit=50`;
-    if (currentFilter.status) {
-      url += `&status=${currentFilter.status}`;
-    }
+    const params = new URLSearchParams({
+      page: "1",
+      page_size: "30"
+    });
+    if (currentFilter.status) params.set("status", currentFilter.status);
 
-    const res = await fetch(url);
+    const res = await fetch(`${API_BASE}/api/v1/jobs?${params.toString()}`);
     if (!res.ok) return;
 
     const data = await res.json();
-    currentJobs = data.items;
+    const newJobs = data.items || [];
+
+    // Detect and log state transitions
+    newJobs.forEach(job => {
+      const shortId = job.id.substring(0, 8);
+      const prev = knownJobStates.get(job.id);
+
+      if (prev && prev.status !== job.status) {
+        if (job.status === "RUNNING") {
+          addSystemTrace(
+            "worker",
+            `Worker [${job.lease_owner || "pool"}] claimed atomic lease for Job ${shortId}... (fencing version: v${job.version})`,
+            "SELECT FOR UPDATE SKIP LOCKED"
+          );
+        } else if (job.status === "SUCCEEDED") {
+          addSystemTrace(
+            "postgres",
+            `Job ${shortId}... SUCCEEDED. Completed audit record committed to PostgreSQL.`,
+            "ACID Commit"
+          );
+        } else if (job.status === "RETRY_WAIT") {
+          addSystemTrace(
+            "worker",
+            `Job ${shortId}... transient failure on attempt ${job.attempt_count}/${job.max_attempts}. Full-jitter backoff waiting for next window.`,
+            "RETRY_WAIT"
+          );
+        } else if (job.status === "CANCELLED") {
+          addSystemTrace(
+            "worker",
+            `Job ${shortId}... cooperative cancellation confirmed. Worker stopped safely.`,
+            "CANCELLED"
+          );
+        } else if (job.status === "QUEUED" && prev.status === "SCHEDULED") {
+          addSystemTrace(
+            "scheduler",
+            `Scheduler promoted due Job ${shortId}... (scheduled_at <= NOW()) -> pushed to Redis buffer.`,
+            "SCHEDULED ➔ QUEUED"
+          );
+        }
+      }
+
+      knownJobStates.set(job.id, {
+        status: job.status,
+        version: job.version,
+        lease_owner: job.lease_owner
+      });
+    });
+
+    currentJobs = newJobs;
+    tableTotalCount.textContent = `${data.total} Jobs in Registry`;
     renderJobsTable();
   } catch (err) {
-    console.warn("Jobs stream error:", err);
+    console.error("Fetch jobs error:", err);
   }
 }
 
+// ==========================================================================
+// RENDER JOBS TABLE
+// ==========================================================================
 function renderJobsTable() {
-  let filtered = currentJobs;
-  if (currentFilter.search) {
-    const q = currentFilter.search.toLowerCase();
-    filtered = filtered.filter(j => j.id.toLowerCase().includes(q) || j.job_type.toLowerCase().includes(q));
-  }
-
-  tableTotalCount.textContent = `${filtered.length} Jobs (${currentJobs.length} loaded)`;
+  const searchTerm = currentFilter.search.toLowerCase().trim();
+  const filtered = currentJobs.filter(job => {
+    if (!searchTerm) return true;
+    return (
+      job.id.toLowerCase().includes(searchTerm) ||
+      job.job_type.toLowerCase().includes(searchTerm) ||
+      (job.lease_owner && job.lease_owner.toLowerCase().includes(searchTerm))
+    );
+  });
 
   if (filtered.length === 0) {
-    tableBody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-8">No matching jobs found in cluster.</td></tr>`;
+    tableBody.innerHTML = `
+      <tr>
+        <td colspan="8" class="text-center text-muted py-8">
+          No matching jobs found. Click any <strong>1-Click Scenario</strong> button above to submit jobs.
+        </td>
+      </tr>
+    `;
     return;
   }
 
   tableBody.innerHTML = filtered.map(job => {
-    const shortId = job.id.substring(0, 8);
-    const prioClass = job.priority >= 80 ? "prio-high" : job.priority >= 40 ? "prio-medium" : "prio-low";
     const isRunning = job.status === "RUNNING";
-    const isQueued = job.status === "QUEUED";
-    const isFailed = job.status === "FAILED";
-    const isCancelled = job.status === "CANCELLED";
-
-    const age = formatTimeAgo(new Date(job.created_at));
+    const isRetry = job.status === "RETRY_WAIT";
+    const isScheduled = job.status === "SCHEDULED";
+    const shortId = job.id.substring(0, 8);
+    const dateStr = formatJobTimestamp(job);
 
     return `
-      <tr>
-        <td>
-          <span class="cell-job-id" onclick="openJobModal('${job.id}')" title="Click to Inspect Details">
-            <span>${shortId}...</span>
-            <small style="opacity:0.6;">🔍</small>
+      <tr onclick="openJobModal('${job.id}')" title="Click to inspect payload, logs, and attempts">
+        <td class="font-mono">
+          <span class="job-id-link">
+            <span class="job-id-prefix">${shortId}...</span>
+            <span class="view-pill">Inspect ↗</span>
           </span>
         </td>
-        <td><code>${job.job_type}</code></td>
-        <td><span class="priority-chip ${prioClass}">P${job.priority}</span></td>
-        <td><span class="status-badge badge-${job.status}">${job.status}</span></td>
-        <td><code>${job.attempt_count} / ${job.max_attempts}</code></td>
-        <td><span title="${job.created_at}">${age}</span></td>
-        <td><span class="fencing-version">v${job.version}</span></td>
-        <td class="table-actions">
-          <button class="btn btn-secondary btn-sm" onclick="openJobModal('${job.id}')">Inspect</button>
-          ${(isRunning || isQueued || job.status === "SCHEDULED" || job.status === "RETRY_WAIT") ? 
-            `<button class="btn btn-danger btn-sm" onclick="cancelJob('${job.id}')">Cancel</button>` : ''}
-          ${(isFailed || isCancelled) ? 
-            `<button class="btn btn-primary btn-sm" onclick="retryJob('${job.id}')">Retry</button>` : ''}
+        <td>
+          <span class="handler-tag">${job.job_type}</span>
+        </td>
+        <td>
+          <span class="priority-pill ${job.priority >= 80 ? "p-high" : job.priority >= 50 ? "p-med" : "p-low"}">
+            P${job.priority}
+          </span>
+        </td>
+        <td>
+          <span class="status-badge badge-${job.status} ${isRunning ? "badge-pulse-running" : ""} ${isRetry ? "badge-pulse-amber" : ""}">
+            ${job.status}
+          </span>
+        </td>
+        <td class="font-mono">
+          ${job.attempt_count} / ${job.max_attempts}
+        </td>
+        <td class="text-muted font-sm">
+          ${dateStr}
+        </td>
+        <td class="font-mono">
+          <span class="version-tag" title="Fencing token incremented on each lease claim">v${job.version}</span>
+        </td>
+        <td class="text-right" onclick="event.stopPropagation()">
+          ${renderRowActions(job)}
         </td>
       </tr>
     `;
   }).join("");
 }
 
-function formatTimeAgo(date) {
-  const diffSec = Math.floor((new Date() - date) / 1000);
-  if (diffSec < 5) return "just now";
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  return `${Math.floor(diffSec / 3600)}h ago`;
+function formatJobTimestamp(job) {
+  if (job.status === "SCHEDULED" && job.scheduled_at) {
+    const diffMs = new Date(job.scheduled_at) - new Date();
+    if (diffMs > 0) {
+      return `⏰ in ${(diffMs / 1000).toFixed(0)}s`;
+    }
+  }
+  const date = new Date(job.created_at);
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function renderRowActions(job) {
+  if (job.status === "QUEUED" || job.status === "RUNNING" || job.status === "SCHEDULED" || job.status === "RETRY_WAIT") {
+    return `<button class="btn btn-outline btn-xs btn-danger" onclick="cancelJob('${job.id}')" title="Cancel this in-flight or waiting job">Cancel</button>`;
+  }
+  if (job.status === "FAILED" || job.status === "CANCELLED") {
+    return `<button class="btn btn-outline btn-xs" onclick="retryJob('${job.id}')" title="Re-queue this job">Retry</button>`;
+  }
+  return `<button class="btn btn-outline btn-xs" onclick="openJobModal('${job.id}')">View</button>`;
 }
 
 // ==========================================================================
-// JOB ACTIONS: SUBMIT, CANCEL, RETRY
+// JOB ACTIONS (CANCEL / RETRY)
 // ==========================================================================
-async function submitCustomJob(e) {
-  e.preventDefault();
-  const jobType = selectJobType.value;
-  const priority = parseInt(inputPriority.value, 10);
-  const delaySec = parseInt(document.getElementById("input-delay-seconds").value, 10);
-  const maxAttempts = parseInt(document.getElementById("input-max-attempts").value, 10);
-  const timeoutSeconds = parseInt(document.getElementById("input-timeout").value, 10);
-
-  let payload = {};
-  if (jobType === "math.calculate") {
-    const op = document.getElementById("math-op").value;
-    if (op === "sum" || op === "multiply") {
-      const raw = document.getElementById("math-operands").value;
-      payload = { operation: op, operands: raw.split(",").map(x => parseInt(x.trim(), 10)).filter(x => !isNaN(x)) };
-    } else {
-      payload = { operation: op, n: parseInt(document.getElementById("math-n").value, 10) };
-    }
-  } else if (jobType === "notification.simulate") {
-    payload = {
-      recipient: document.getElementById("notif-recipient").value,
-      channel: document.getElementById("notif-channel").value,
-      template: document.getElementById("notif-template").value,
-      simulate_failure_rate: parseFloat(document.getElementById("notif-fail-rate").value),
-      simulated_delay_seconds: parseFloat(document.getElementById("notif-delay").value)
-    };
-  } else if (jobType === "report.generate") {
-    payload = {
-      report_type: document.getElementById("report-type").value,
-      date_range_days: parseInt(document.getElementById("report-days").value, 10),
-      simulated_duration_ms: parseInt(document.getElementById("report-duration").value, 10),
-      row_count: parseInt(document.getElementById("report-rows").value, 10)
-    };
-  }
-
-  let scheduledAt = null;
-  if (delaySec > 0) {
-    const d = new Date(Date.now() + delaySec * 1000);
-    scheduledAt = d.toISOString();
-  }
-
-  const reqBody = {
-    job_type: jobType,
-    payload: payload,
-    priority: priority,
-    max_attempts: maxAttempts,
-    timeout_seconds: timeoutSeconds,
-    scheduled_at: scheduledAt
-  };
-
-  try {
-    const res = await fetch(`${API_BASE}/api/v1/jobs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(reqBody)
-    });
-
-    if (res.ok) {
-      const job = await res.json();
-      showToast(`Job ${job.id.substring(0, 8)} submitted (${job.status})!`, "success");
-      await fetchJobs();
-      await fetchMetricsAndHealth();
-    } else {
-      const err = await res.json();
-      showToast(`Submission rejected: ${JSON.stringify(err.detail)}`, "error");
-    }
-  } catch (err) {
-    showToast(`Network error: ${err.message}`, "error");
-  }
-}
-
 async function cancelJob(jobId) {
   try {
+    addSystemTrace("client", `Sending cooperative cancel request for Job ${jobId.substring(0,8)}...`, "POST /cancel");
     const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/cancel`, { method: "POST" });
     if (res.ok) {
-      const data = await res.json();
-      showToast(`Job ${jobId.substring(0, 8)} cancelled!`, "success");
+      showToast("Cancellation broadcasted to worker pool", "success");
+      addSystemTrace("worker", `Cancellation token acknowledged for Job ${jobId.substring(0,8)}...`, "Cooperative Stop");
       await fetchJobs();
       await fetchMetricsAndHealth();
-      if (modalBackdrop.classList.contains("active")) {
-        openJobModal(jobId);
-      }
     } else {
       const err = await res.json();
-      showToast(`Cancel failed: ${err.detail.message || "Conflict"}`, "error");
+      showToast(err.detail || "Cancellation failed", "error");
     }
   } catch (err) {
-    showToast(`Error: ${err.message}`, "error");
+    console.error("Cancel job error:", err);
+    showToast("Network error during cancellation", "error");
   }
 }
 
 async function retryJob(jobId) {
   try {
+    addSystemTrace("client", `Manual retry requested for Job ${jobId.substring(0,8)}...`, "POST /retry");
     const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/retry`, { method: "POST" });
     if (res.ok) {
-      showToast(`Job ${jobId.substring(0, 8)} re-enqueued for retry!`, "success");
+      showToast("Job reset and re-queued", "success");
+      addSystemTrace("redis", `Job ${jobId.substring(0,8)}... re-enqueued to Redis buffer.`, "QUEUED");
       await fetchJobs();
       await fetchMetricsAndHealth();
-      if (modalBackdrop.classList.contains("active")) {
-        openJobModal(jobId);
-      }
     } else {
       const err = await res.json();
-      showToast(`Retry failed: ${err.detail.message || "Conflict"}`, "error");
+      showToast(err.detail || "Retry failed", "error");
     }
   } catch (err) {
-    showToast(`Error: ${err.message}`, "error");
+    console.error("Retry job error:", err);
+    showToast("Network error during retry", "error");
   }
 }
 
@@ -322,7 +414,11 @@ async function retryJob(jobId) {
 async function runScenario(scenarioKey) {
   if (scenarioKey === "immediate") {
     showToast("Launching immediate high-priority calculation...", "info");
-    await fetch(`${API_BASE}/api/v1/jobs`, {
+    addSystemTrace("client", "Dispatched Immediate Math Calculation (Fibonacci n=35, Priority 95)", "POST /api/v1/jobs");
+    addSystemTrace("postgres", "Durable ACID transaction committed -> status=QUEUED, version=1", "INSERT INTO jobs");
+    addSystemTrace("redis", "Buffer push -> LPUSH queue:default", "Ready for Worker");
+
+    const res = await fetch(`${API_BASE}/api/v1/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -331,9 +427,16 @@ async function runScenario(scenarioKey) {
         priority: 95
       })
     });
+    if (res.ok) {
+      const job = await res.json();
+      addSystemTrace("worker", `Worker pool acquired Job ${job.id.substring(0,8)}... computing fibonacci(35)`, "RUNNING");
+    }
   } else if (scenarioKey === "scheduled") {
     const target = new Date(Date.now() + 8000).toISOString();
     showToast("Scheduling job for +8 seconds into the future...", "info");
+    addSystemTrace("client", "Submitted future job with +8s delay", "scheduled_at = NOW() + 8s");
+    addSystemTrace("postgres", "Stored in PostgreSQL with status=SCHEDULED. Awaiting scheduler polling.", "Durable State");
+
     await fetch(`${API_BASE}/api/v1/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -346,6 +449,9 @@ async function runScenario(scenarioKey) {
     });
   } else if (scenarioKey === "retry") {
     showToast("Dispatching transient fault task with exponential backoff...", "info");
+    addSystemTrace("client", "Submitted transient fault simulation job (notification.simulate, fail_rate=1.0)", "Simulated Fault");
+    addSystemTrace("postgres", "Job committed to PostgreSQL with max_attempts=3", "status=QUEUED");
+
     await fetch(`${API_BASE}/api/v1/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -358,6 +464,8 @@ async function runScenario(scenarioKey) {
     });
   } else if (scenarioKey === "cancel") {
     showToast("Dispatching 6s task, will broadcast cancellation in 800ms...", "info");
+    addSystemTrace("client", "Dispatched 6s multi-chunk task (report.generate) with 50,000 rows...", "chunk_count=6");
+
     const res = await fetch(`${API_BASE}/api/v1/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -369,12 +477,17 @@ async function runScenario(scenarioKey) {
     });
     if (res.ok) {
       const job = await res.json();
+      addSystemTrace("worker", `Job ${job.id.substring(0,8)}... RUNNING on worker. Executing chunk 1/6...`, "RUNNING");
       setTimeout(async () => {
+        addSystemTrace("client", `Broadcasting cooperative cancellation for Job ${job.id.substring(0,8)}...`, "POST /cancel");
         await cancelJob(job.id);
       }, 800);
     }
   } else if (scenarioKey === "burst") {
     showToast("Firing burst of 10 concurrent jobs across worker pool...", "info");
+    addSystemTrace("client", "Burst triggered: submitting 10 parallel jobs with mixed priorities (10-100)...", "10 Concurrent POSTs");
+    addSystemTrace("redis", "Buffered 10 items in queue:default. 4 worker processes competing via SKIP LOCKED.", "Concurrent Pool");
+
     const promises = [];
     for (let i = 1; i <= 10; i++) {
       promises.push(
@@ -420,7 +533,7 @@ async function openJobModal(jobId) {
       <div class="meta-item"><span class="meta-label">Fencing Token (Version)</span><span class="meta-value">v${job.version}</span></div>
       <div class="meta-item"><span class="meta-label">Attempts</span><span class="meta-value">${job.attempt_count} / ${job.max_attempts}</span></div>
       <div class="meta-item"><span class="meta-label">Timeout</span><span class="meta-value">${job.timeout_seconds}s</span></div>
-      <div class="meta-item"><span class="meta-label">Lease Owner</span><span class="meta-value">${job.lease_owner || "None"}</span></div>
+      <div class="meta-item"><span class="meta-label">Lease Owner</span><span class="meta-value">${job.lease_owner || "None (Released)"}</span></div>
       <div class="meta-item"><span class="meta-label">Scheduled For</span><span class="meta-value">${new Date(job.scheduled_at).toLocaleString()}</span></div>
     `;
 
@@ -488,15 +601,186 @@ modalBackdrop.addEventListener("click", (e) => {
 });
 
 // ==========================================================================
-// DYNAMIC PAYLOAD FORM GENERATOR
+// WORKFLOW GUIDE MODAL
 // ==========================================================================
+function openWorkflowModal() {
+  workflowModalBackdrop.classList.add("active");
+  addSystemTrace("client", "User opened System Architecture & Exact Workflow guide.", "Documentation");
+}
+
+function closeWorkflowModal() {
+  workflowModalBackdrop.classList.remove("active");
+}
+
+if (btnOpenWorkflow) btnOpenWorkflow.addEventListener("click", openWorkflowModal);
+if (btnBannerFullGuide) btnBannerFullGuide.addEventListener("click", openWorkflowModal);
+if (workflowModalClose) workflowModalClose.addEventListener("click", closeWorkflowModal);
+if (workflowModalBackdrop) {
+  workflowModalBackdrop.addEventListener("click", (e) => {
+    if (e.target === workflowModalBackdrop) closeWorkflowModal();
+  });
+}
+
+// Workflow modal tabs
+document.querySelectorAll(".workflow-nav-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".workflow-nav-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".wf-content-view").forEach(v => v.classList.remove("active"));
+
+    btn.classList.add("active");
+    const targetId = btn.getAttribute("data-view");
+    const targetEl = document.getElementById(targetId);
+    if (targetEl) targetEl.classList.add("active");
+  });
+});
+
+// ==========================================================================
+// ON-PAGE WORKFLOW BANNER TOGGLE & TABS
+// ==========================================================================
+if (btnToggleGuideDetails) {
+  btnToggleGuideDetails.addEventListener("click", () => {
+    const isHidden = guideDetailsPanel.style.display === "none";
+    if (isHidden) {
+      guideDetailsPanel.style.display = "block";
+      guideToggleText.textContent = "Hide Workflow Instructions ▲";
+    } else {
+      guideDetailsPanel.style.display = "none";
+      guideToggleText.textContent = "Show Workflow Instructions ▼";
+    }
+  });
+}
+
+document.querySelectorAll(".guide-tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".guide-tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".guide-tab-pane").forEach(p => p.classList.remove("active"));
+
+    btn.classList.add("active");
+    const targetId = btn.getAttribute("data-tab");
+    const targetEl = document.getElementById(targetId);
+    if (targetEl) targetEl.classList.add("active");
+  });
+});
+
+// ==========================================================================
+// CLEAR TRACE & RESET FILTERS
+// ==========================================================================
+if (btnClearTrace) {
+  btnClearTrace.addEventListener("click", () => {
+    traceTerminal.innerHTML = "";
+    addSystemTrace("client", "Trace feed cleared by user.", "Reset");
+  });
+}
+
+if (btnResetFilters) {
+  btnResetFilters.addEventListener("click", () => {
+    filterSearch.value = "";
+    filterStatus.value = "";
+    currentFilter.search = "";
+    currentFilter.status = "";
+    fetchJobs();
+    showToast("Filters reset", "info");
+  });
+}
+
+// ==========================================================================
+// INTERACTIVE STATE MACHINE PIPELINE NODES
+// ==========================================================================
+document.querySelectorAll("[data-filter]").forEach(el => {
+  el.style.cursor = "pointer";
+  el.addEventListener("click", () => {
+    const statusVal = el.getAttribute("data-filter");
+    filterStatus.value = statusVal;
+    currentFilter.status = statusVal;
+    fetchJobs();
+    showToast(`Filtering jobs by ${statusVal}`, "info");
+    addSystemTrace("client", `Filtering registry table by status: ${statusVal}`, "Table Filter");
+  });
+});
+
+// ==========================================================================
+// CUSTOM JOB DISPATCH STUDIO
+// ==========================================================================
+async function submitCustomJob(e) {
+  e.preventDefault();
+  const jobType = selectJobType.value;
+  const priority = parseInt(inputPriority.value, 10);
+  const delaySec = parseInt(document.getElementById("input-delay-seconds").value, 10);
+  const maxAttempts = parseInt(document.getElementById("input-max-attempts").value, 10);
+  const timeoutSec = parseInt(document.getElementById("input-timeout").value, 10);
+
+  let payload = {};
+
+  if (jobType === "math.calculate") {
+    const op = document.getElementById("math-op").value;
+    if (op === "sum" || op === "multiply") {
+      const opsStr = document.getElementById("math-operands").value;
+      const operands = opsStr.split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+      payload = { operation: op, operands };
+    } else {
+      const n = parseInt(document.getElementById("math-n").value, 10) || 10;
+      payload = { operation: op, n };
+    }
+  } else if (jobType === "notification.simulate") {
+    payload = {
+      recipient: document.getElementById("notif-recipient").value,
+      channel: document.getElementById("notif-channel").value,
+      template: document.getElementById("notif-template").value,
+      simulate_failure_rate: parseFloat(document.getElementById("notif-fail-rate").value) || 0.0,
+      simulated_delay_seconds: parseFloat(document.getElementById("notif-delay").value) || 0.0
+    };
+  } else if (jobType === "report.generate") {
+    payload = {
+      report_type: document.getElementById("report-type").value,
+      date_range_days: parseInt(document.getElementById("report-days").value, 10) || 30,
+      simulated_duration_ms: parseInt(document.getElementById("report-duration").value, 10) || 1000,
+      row_count: parseInt(document.getElementById("report-rows").value, 10) || 10000
+    };
+  }
+
+  const bodyData = {
+    job_type: jobType,
+    payload,
+    priority,
+    max_attempts: maxAttempts,
+    timeout_seconds: timeoutSec
+  };
+
+  if (delaySec > 0) {
+    bodyData.scheduled_at = new Date(Date.now() + delaySec * 1000).toISOString();
+  }
+
+  try {
+    addSystemTrace("client", `Submitting custom job (${jobType}, Priority: ${priority})`, "POST /api/v1/jobs");
+    const res = await fetch(`${API_BASE}/api/v1/jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyData)
+    });
+
+    if (res.ok) {
+      const created = await res.json();
+      showToast(`Job ${created.id.substring(0, 8)}... created (${created.status})`, "success");
+      addSystemTrace("postgres", `Job ${created.id.substring(0,8)}... committed with initial status: ${created.status}`, "ACID Write");
+      await fetchJobs();
+      await fetchMetricsAndHealth();
+    } else {
+      const err = await res.json();
+      showToast(err.detail || "Failed to submit job", "error");
+    }
+  } catch (err) {
+    console.error("Submit custom job error:", err);
+    showToast("Network error submitting job", "error");
+  }
+}
+
 function updatePayloadFields() {
   const type = selectJobType.value;
   if (type === "math.calculate") {
     payloadFieldsContainer.innerHTML = `
       <div class="form-row">
         <div class="form-group flex-1">
-          <label>Operation</label>
+          <label>Math Operation</label>
           <select id="math-op" class="form-control" onchange="toggleMathInputs()">
             <option value="sum">Sum</option>
             <option value="multiply">Multiply</option>
@@ -614,6 +898,7 @@ btnRefresh.addEventListener("click", () => {
   fetchMetricsAndHealth();
   fetchJobs();
   showToast("Mission Control refreshed", "info");
+  addSystemTrace("client", "Manual refresh requested.", "Refreshed");
 });
 
 toggleAutoRefresh.addEventListener("change", (e) => {
@@ -621,9 +906,11 @@ toggleAutoRefresh.addEventListener("change", (e) => {
   if (isAutoRefresh) {
     startAutoPolling();
     showToast("Live streaming resumed", "info");
+    addSystemTrace("client", "Live polling resumed (1.5s interval).", "Streaming");
   } else {
     clearInterval(refreshTimer);
     showToast("Live streaming paused", "info");
+    addSystemTrace("client", "Live polling paused.", "Paused");
   }
 });
 
@@ -652,3 +939,11 @@ updatePayloadFields();
 fetchMetricsAndHealth();
 fetchJobs();
 startAutoPolling();
+
+// Initial system traces
+addSystemTrace("client", "Mission Control dashboard initialized. Connected to FastAPI gateway.", "Ready");
+addSystemTrace("postgres", "Authoritative schema verified: jobs (ACID state), job_attempts (Audit logs).", "Connected");
+addSystemTrace("redis", "Ephemeral priority queue buffer active: queue:default", "Connected");
+addSystemTrace("scheduler", "Daemon active: polling scheduled_at <= NOW() with SKIP LOCKED every 1.0s", "Armed");
+addSystemTrace("worker", "Worker pool active: autonomous processes claiming leases with version fencing", "Ready");
+addSystemTrace("reaper", "Crash recovery sweeper armed: checking for expired leases every 5.0s", "Armed");

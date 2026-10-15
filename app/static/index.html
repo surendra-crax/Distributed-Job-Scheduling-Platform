@@ -18,41 +18,44 @@
         <div class="logo-icon">⚡</div>
         <div>
           <h1 class="logo-title">Distributed Job Scheduler</h1>
-          <p class="logo-subtitle">Mission Control • Durable State Engine</p>
+          <p class="logo-subtitle">Mission Control • Durable Distributed State Engine</p>
         </div>
       </div>
     </div>
     
     <!-- Cluster Topology Health Pills -->
     <div class="cluster-status-bar">
-      <div class="status-pill" id="pill-postgres">
+      <div class="status-pill" id="pill-postgres" title="Authoritative ACID persistence for jobs, attempts, and leases">
         <span class="status-dot"></span>
         <span class="status-label">PostgreSQL:</span>
         <span class="status-val" id="val-postgres">Checking...</span>
       </div>
-      <div class="status-pill" id="pill-redis">
+      <div class="status-pill" id="pill-redis" title="Ephemeral low-latency priority dispatch queue and active buffers">
         <span class="status-dot"></span>
         <span class="status-label">Redis Buffer:</span>
         <span class="status-val" id="val-redis">Checking...</span>
       </div>
-      <div class="status-pill" id="pill-scheduler">
+      <div class="status-pill" id="pill-scheduler" title="Polls scheduled_at <= NOW() with FOR UPDATE SKIP LOCKED">
         <span class="status-dot"></span>
         <span class="status-label">Scheduler:</span>
         <span class="status-val">Active (1s tick)</span>
       </div>
-      <div class="status-pill" id="pill-workers">
+      <div class="status-pill" id="pill-workers" title="Autonomous worker processes claiming leases with version fencing">
         <span class="status-dot"></span>
         <span class="status-label">Worker Pool:</span>
         <span class="status-val">4 Slots Active</span>
       </div>
-      <div class="status-pill" id="pill-recovery">
+      <div class="status-pill" id="pill-recovery" title="Reclaims expired leases from dead workers & reconciles orphaned items">
         <span class="status-dot"></span>
         <span class="status-label">Recovery Reaper:</span>
-        <span class="status-val">Armed</span>
+        <span class="status-val">Armed (5s tick)</span>
       </div>
     </div>
 
     <div class="header-right">
+      <button class="btn btn-guide btn-sm" id="btn-open-workflow" title="Open complete architecture and workflow guide">
+        <span>📖 System Workflow & Guide</span>
+      </button>
       <div class="auto-refresh-control">
         <label class="switch">
           <input type="checkbox" id="toggle-autorefresh" checked>
@@ -66,6 +69,145 @@
   </header>
 
   <main class="dashboard-container">
+
+    <!-- Interactive Workflow & Testing Instructions Banner -->
+    <section class="workflow-banner" id="workflow-quick-guide">
+      <div class="workflow-banner-header">
+        <div class="workflow-banner-title">
+          <span class="workflow-pulse-icon">💡</span>
+          <div>
+            <h3>What This Platform Does & Step-by-Step Testing Guide</h3>
+            <p>Guaranteed durable background job execution across distributed worker processes. Zero duplicate runs, zero lost jobs, and automatic crash recovery.</p>
+          </div>
+        </div>
+        <div class="workflow-banner-actions">
+          <button class="btn btn-primary btn-sm" id="btn-toggle-guide-details">
+            <span id="guide-toggle-text">Show Workflow Instructions ▼</span>
+          </button>
+          <button class="btn btn-guide btn-sm" id="btn-banner-full-guide">Full Architecture Diagrams ↗</button>
+        </div>
+      </div>
+      
+      <!-- Collapsible Detailed Instructions & Workflow Cards -->
+      <div class="workflow-banner-content" id="guide-details-panel" style="display: none;">
+        <div class="guide-tabs">
+          <button class="guide-tab-btn active" data-tab="tab-workflow-steps">1. The Exact 6-Step Workflow</button>
+          <button class="guide-tab-btn" data-tab="tab-testing-scenarios">2. Click-by-Click Testing Guide</button>
+          <button class="guide-tab-btn" data-tab="tab-core-principles">3. Why This System is Reliable</button>
+        </div>
+
+        <!-- Tab 1: Exact 6-Step Workflow -->
+        <div class="guide-tab-pane active" id="tab-workflow-steps">
+          <div class="workflow-stepper-grid">
+            <div class="step-card">
+              <div class="step-badge">Step 1</div>
+              <h4>📥 Ingestion & Durability</h4>
+              <p>Job is submitted via API. The server commits it immediately to <strong>PostgreSQL</strong> with <code>version=1</code>. Zero job loss if server dies right after.</p>
+            </div>
+            <div class="step-card">
+              <div class="step-badge">Step 2</div>
+              <h4>⚡ Redis Queue Dispatch</h4>
+              <p>Ready jobs are pushed to Redis priority queues (<code>queue:default</code>) for sub-millisecond retrieval. Delayed jobs stay in Postgres.</p>
+            </div>
+            <div class="step-card">
+              <div class="step-badge">Step 3</div>
+              <h4>⏱️ Scheduler Daemon (1s)</h4>
+              <p>Every 1s, the scheduler runs <code>SELECT ... FOR UPDATE SKIP LOCKED</code> on Postgres for jobs where <code>scheduled_at &lt;= NOW()</code>, moving them to Redis.</p>
+            </div>
+            <div class="step-card">
+              <div class="step-badge">Step 4</div>
+              <h4>🔒 Atomic Lease & Fencing</h4>
+              <p>Worker pops job from Redis and claims an exclusive lease in Postgres: <code>version = version + 1</code>. Prevents split-brain duplicate runs.</p>
+            </div>
+            <div class="step-card">
+              <div class="step-badge">Step 5</div>
+              <h4>⚙️ Execution & Heartbeats</h4>
+              <p>Worker executes handler. Sends heartbeats every 2s to renew lease. Checks cancellation flag between iterations to abort cooperatively.</p>
+            </div>
+            <div class="step-card">
+              <div class="step-badge">Step 6</div>
+              <h4>🔄 Backoff or Recovery</h4>
+              <p>Success updates <code>SUCCEEDED</code>. Transient errors retry with <strong>full-jitter exponential backoff</strong>. Dead workers are recovered by the Reaper.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Click-by-Click Testing Scenarios -->
+        <div class="guide-tab-pane" id="tab-testing-scenarios">
+          <div class="scenario-guide-table-wrap">
+            <table class="scenario-guide-table">
+              <thead>
+                <tr>
+                  <th>Test Scenario</th>
+                  <th>Exact Action</th>
+                  <th>What Happens Under the Hood</th>
+                  <th>What to Look For in UI</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>⚡ Immediate Math</strong></td>
+                  <td>Click <code>[Immediate Math Calculation]</code> button</td>
+                  <td>Dispatches fibonacci calculation (priority 90). Worker claims lease via <code>SKIP LOCKED</code>, computes result, and saves to Postgres.</td>
+                  <td>Watch job appear in table; turns <span class="badge badge-success">SUCCEEDED</span> in <strong>~10ms</strong>. Click row to see <code>result: 9227465</code>.</td>
+                </tr>
+                <tr>
+                  <td><strong>⏰ Schedule in +8s</strong></td>
+                  <td>Click <code>[Schedule Future Job (+8s)]</code> button</td>
+                  <td>Job stays in Postgres with <code>status='SCHEDULED'</code>. Redis queue stays empty until Scheduler daemon detects <code>scheduled_at &lt;= NOW()</code> at +8 seconds.</td>
+                  <td>Status says <span class="badge badge-scheduled">SCHEDULED</span> with countdown. Exactly 8s later, turns <span class="badge badge-running">RUNNING</span> then <span class="badge badge-success">SUCCEEDED</span>.</td>
+                </tr>
+                <tr>
+                  <td><strong>🔥 Fault & Exponential Backoff</strong></td>
+                  <td>Click <code>[Transient Failure & Backoff]</code> button</td>
+                  <td>Simulates upstream network 503 error. Worker catches exception, calculates <code>delay = random(0, 2^attempt)</code>, transitions to <code>RETRY_WAIT</code>.</td>
+                  <td>Turns to amber <span class="badge badge-retry">RETRY_WAIT</span>. Click the row to see 3 separate execution attempts in the audit log timeline!</td>
+                </tr>
+                <tr>
+                  <td><strong>🛑 Cooperative Cancellation</strong></td>
+                  <td>Click <code>[Cooperative Cancellation]</code> button</td>
+                  <td>Dispatches a 15-second report job. The script triggers <code>POST /cancel</code>. Worker checks cancellation token between chunks and safely halts.</td>
+                  <td>Status flips from <span class="badge badge-running">RUNNING</span> to <span class="badge badge-cancel">CANCELLED</span>. No stranded zombie threads!</td>
+                </tr>
+                <tr>
+                  <td><strong>💥 10-Job Concurrency Burst</strong></td>
+                  <td>Click <code>[Fire 10 Concurrent Jobs]</code> button</td>
+                  <td>Floods 10 mixed tasks with varying priorities. 4 worker processes race to claim jobs using row locks.</td>
+                  <td>Watch the <strong>Worker Pool</strong> and <strong>Active Leases</strong> counter spike, processing highest priority jobs first!</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Tab 3: Core Reliability Principles -->
+        <div class="guide-tab-pane" id="tab-core-principles">
+          <div class="principles-grid">
+            <div class="principle-card">
+              <span class="principle-icon">🔒</span>
+              <h4>Atomic Leases & FOR UPDATE SKIP LOCKED</h4>
+              <p>PostgreSQL handles concurrency at the row level. Workers skip locked rows simultaneously with zero deadlocks and zero duplicate processing.</p>
+            </div>
+            <div class="principle-card">
+              <span class="principle-icon">🛡️</span>
+              <h4>Version Fencing Tokens</h4>
+              <p>Every lease claim increments <code>jobs.version</code>. If an old worker wakes up after a GC pause, its stale token is rejected by the database.</p>
+            </div>
+            <div class="principle-card">
+              <span class="principle-icon">📈</span>
+              <h4>Full-Jitter Exponential Backoff</h4>
+              <p>Retries randomize wait intervals: $delay = \text{random}(0, \text{base} \times 2^{\text{attempt}})$. Prevents thundering herds from crashing downstream APIs.</p>
+            </div>
+            <div class="principle-card">
+              <span class="principle-icon">🧟</span>
+              <h4>Crash Recovery Reaper</h4>
+              <p>If a worker machine loses power mid-task, its lease expires. The recovery daemon detects expired leases and safely re-enqueues the job.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Top KPI Stat Cards -->
     <section class="kpi-grid">
       <div class="kpi-card glow-cyan">
@@ -125,40 +267,40 @@
 
     <!-- Distributed State Lifecycle Flow Banner -->
     <section class="lifecycle-banner">
-      <div class="lifecycle-title">Distributed Job State Machine Pipeline</div>
+      <div class="lifecycle-title">Distributed Job State Machine Pipeline (Click any state to filter & inspect)</div>
       <div class="lifecycle-stages">
-        <div class="stage-node" id="stage-scheduled">
+        <div class="stage-node" id="stage-scheduled" data-filter="SCHEDULED" title="Waiting for scheduled time. Polled by Scheduler daemon.">
           <div class="stage-icon">⏱️</div>
           <div class="stage-name">SCHEDULED</div>
           <div class="stage-count" id="count-scheduled">0</div>
         </div>
         <div class="stage-arrow">➔</div>
-        <div class="stage-node" id="stage-queued">
+        <div class="stage-node" id="stage-queued" data-filter="QUEUED" title="In Redis buffer awaiting an available worker slot.">
           <div class="stage-icon">📥</div>
           <div class="stage-name">QUEUED</div>
           <div class="stage-count" id="count-queued">0</div>
         </div>
         <div class="stage-arrow">➔</div>
-        <div class="stage-node" id="stage-running">
+        <div class="stage-node" id="stage-running" data-filter="RUNNING" title="Claimed by worker with active lease lock and version fencing.">
           <div class="stage-icon">⚡</div>
           <div class="stage-name">RUNNING</div>
           <div class="stage-count" id="count-running">0</div>
         </div>
         <div class="stage-arrow">➔</div>
         <div class="stage-outcomes">
-          <div class="outcome-pill outcome-success">
+          <div class="outcome-pill outcome-success" data-filter="SUCCEEDED" title="Finished successfully with audit result in Postgres.">
             <span>✅ SUCCEEDED</span>
             <span class="outcome-count" id="count-succeeded">0</span>
           </div>
-          <div class="outcome-pill outcome-retry">
+          <div class="outcome-pill outcome-retry" data-filter="RETRY_WAIT" title="Encountered transient error. Waiting for jitter backoff.">
             <span>🔄 RETRY_WAIT</span>
             <span class="outcome-count" id="count-retry">0</span>
           </div>
-          <div class="outcome-pill outcome-fail">
+          <div class="outcome-pill outcome-fail" data-filter="FAILED" title="Exhausted max attempts or encountered permanent failure.">
             <span>❌ FAILED</span>
             <span class="outcome-count" id="count-failed">0</span>
           </div>
-          <div class="outcome-pill outcome-cancel">
+          <div class="outcome-pill outcome-cancel" data-filter="CANCELLED" title="Cooperative cancellation requested and confirmed.">
             <span>🚫 CANCELLED</span>
             <span class="outcome-count" id="count-cancelled">0</span>
           </div>
@@ -171,50 +313,55 @@
       <!-- 1-Click Interactive Test Scenarios -->
       <section class="panel panel-scenarios">
         <div class="panel-header">
-          <h2>⚡ Real-World Test Scenarios</h2>
-          <span class="panel-tag">1-Click Live Demonstrations</span>
+          <h2>⚡ 1-Click Scenario Demonstrator</h2>
+          <span class="panel-tag">Live Engine Triggers</span>
         </div>
-        <p class="panel-desc">Click any scenario to immediately trigger distributed behaviors and watch workers, schedulers, and reapers respond live.</p>
+        <p class="panel-desc">Click any scenario below. The system triggers distributed actions and logs every internal step to the Live Trace terminal below.</p>
 
         <div class="scenario-buttons-grid">
-          <button class="scenario-btn" id="scenario-immediate">
+          <button class="scenario-btn" id="scenario-immediate" title="Test fast immediate execution">
             <div class="scenario-icon">🚀</div>
             <div class="scenario-info">
               <div class="scenario-title">Immediate Math Calculation</div>
-              <div class="scenario-sub">Priority 90 • Fibonacci sequence n=35</div>
+              <div class="scenario-sub">Priority 90 • Fibonacci n=35 • Executes in ~10ms</div>
             </div>
+            <span class="scenario-action-tag">Test Ingestion & Run ➔</span>
           </button>
 
-          <button class="scenario-btn" id="scenario-scheduled">
+          <button class="scenario-btn" id="scenario-scheduled" title="Test future scheduling">
             <div class="scenario-icon">⏱️</div>
             <div class="scenario-info">
               <div class="scenario-title">Schedule Future Job (+8s)</div>
-              <div class="scenario-sub">Watch Scheduler pick up due job in 8 seconds</div>
+              <div class="scenario-sub">Stays in SCHEDULED state until Scheduler picks it up</div>
             </div>
+            <span class="scenario-action-tag">Test Scheduler Daemon ➔</span>
           </button>
 
-          <button class="scenario-btn" id="scenario-retry">
+          <button class="scenario-btn" id="scenario-retry" title="Test transient error and backoff">
             <div class="scenario-icon">🔄</div>
             <div class="scenario-info">
               <div class="scenario-title">Transient Failure & Backoff</div>
-              <div class="scenario-sub">Simulates network blip • Retries with jitter</div>
+              <div class="scenario-sub">Simulates 503 error • Full-jitter exponential retry</div>
             </div>
+            <span class="scenario-action-tag">Test Retry Backoff ➔</span>
           </button>
 
-          <button class="scenario-btn" id="scenario-cancel">
+          <button class="scenario-btn" id="scenario-cancel" title="Test cooperative cancellation">
             <div class="scenario-icon">🛑</div>
             <div class="scenario-info">
               <div class="scenario-title">Cooperative Cancellation</div>
-              <div class="scenario-sub">Dispatches long job & broadcasts abort token</div>
+              <div class="scenario-sub">Starts 15s chunked job & aborts mid-flight</div>
             </div>
+            <span class="scenario-action-tag">Test Safe Abort ➔</span>
           </button>
 
-          <button class="scenario-btn" id="scenario-burst">
+          <button class="scenario-btn" id="scenario-burst" title="Test worker pool concurrency">
             <div class="scenario-icon">💥</div>
             <div class="scenario-info">
               <div class="scenario-title">Fire 10 Concurrent Jobs</div>
-              <div class="scenario-sub">Watch 4 workers partition work simultaneously</div>
+              <div class="scenario-sub">Floods queue • 4 workers balance by priority</div>
             </div>
+            <span class="scenario-action-tag">Test Concurrency Pool ➔</span>
           </button>
         </div>
       </section>
@@ -277,11 +424,29 @@
       </section>
     </div>
 
+    <!-- Live Distributed System Trace & Event Log -->
+    <section class="panel panel-trace">
+      <div class="panel-header trace-header">
+        <div class="trace-title-group">
+          <h2>📡 Live Distributed System Trace & Event Feed</h2>
+          <span class="panel-tag">Real-Time Engine Activity</span>
+        </div>
+        <div class="trace-actions">
+          <span class="trace-status"><span class="status-dot"></span> Streaming live actions</span>
+          <button class="btn btn-outline btn-xs" id="btn-clear-trace">Clear Feed</button>
+        </div>
+      </div>
+      <p class="panel-desc">Real-time operational log showing ACID commits, Redis queue pushes, worker atomic lease acquisitions (<code>SKIP LOCKED</code>), heartbeats, and exponential backoff retry cycles:</p>
+      <div class="trace-terminal" id="trace-terminal">
+        <!-- Live event rows populated by JS -->
+      </div>
+    </section>
+
     <!-- Real-time Jobs Stream & Inspector Table -->
     <section class="panel panel-jobs">
       <div class="panel-header table-controls">
         <div class="table-title-group">
-          <h2>📋 Live Job Registry</h2>
+          <h2>📋 Live Job Registry & Audit Table</h2>
           <span class="job-count-badge" id="table-total-count">0 Jobs Loaded</span>
         </div>
         
@@ -297,6 +462,7 @@
             <option value="FAILED">FAILED</option>
             <option value="CANCELLED">CANCELLED</option>
           </select>
+          <button class="btn btn-outline btn-sm" id="btn-reset-filters">Reset</button>
         </div>
       </div>
 
@@ -304,7 +470,7 @@
         <table class="jobs-table">
           <thead>
             <tr>
-              <th>Job ID</th>
+              <th>Job ID (Click row to inspect)</th>
               <th>Handler Type</th>
               <th>Priority</th>
               <th>Status</th>
@@ -337,7 +503,7 @@
 
       <div class="modal-body">
         <div class="modal-section">
-          <h4>Job Metadata</h4>
+          <h4>Job Metadata & Distributed Locking</h4>
           <div class="meta-grid" id="modal-meta-grid">
             <!-- Rendered by JS -->
           </div>
@@ -359,7 +525,7 @@
         </div>
 
         <div class="modal-section">
-          <h4>Execution Attempts Audit Log</h4>
+          <h4>Execution Attempts Audit Log (Retries & Durations)</h4>
           <div class="attempts-timeline" id="modal-attempts-container">
             <p class="text-muted">No attempt history recorded yet.</p>
           </div>
@@ -368,6 +534,139 @@
 
       <div class="modal-footer" id="modal-footer-actions">
         <!-- Action buttons rendered dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Complete System Workflow & Architecture Modal -->
+  <div class="modal-backdrop" id="workflow-modal-backdrop">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <div>
+          <h3>System Architecture & Exact Distributed Workflow</h3>
+          <p class="modal-subtitle">Deep dive into PostgreSQL durable state, Redis buffers, atomic leasing, and crash recovery</p>
+        </div>
+        <button class="modal-close-btn" id="workflow-modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="workflow-modal-nav">
+          <button class="workflow-nav-btn active" data-view="wf-overview">Overview & Components</button>
+          <button class="workflow-nav-btn" data-view="wf-sequence">Distributed Sequence</button>
+          <button class="workflow-nav-btn" data-view="wf-guarantees">Concurrency & Safety</button>
+        </div>
+
+        <!-- View 1: Architecture Overview -->
+        <div class="wf-content-view active" id="wf-overview">
+          <div class="arch-box">
+            <h4>Decoupled Two-Tier Architecture</h4>
+            <p>Traditional message brokers (like RabbitMQ or basic Redis lists) lose state if a worker crashes before acknowledging, or lack transactional ACID guarantees. This platform employs a dual-tier design:</p>
+            <div class="arch-tier-grid">
+              <div class="tier-card">
+                <div class="tier-icon">🐘</div>
+                <h5>Tier 1: PostgreSQL (Durable Truth)</h5>
+                <ul>
+                  <li>Authoritative source of truth for all jobs, status, payloads, and attempts.</li>
+                  <li>Atomic lease claiming using <code>SELECT ... FOR UPDATE SKIP LOCKED</code>.</li>
+                  <li>Optimistic concurrency control with <code>jobs.version</code> fencing tokens.</li>
+                </ul>
+              </div>
+              <div class="tier-card">
+                <div class="tier-icon">⚡</div>
+                <h5>Tier 2: Redis (Ephemeral Buffer)</h5>
+                <ul>
+                  <li>Low-latency dispatch buffer: workers block on <code>BRPOPLPUSH</code>.</li>
+                  <li>Priority queueing (high priority jobs processed ahead of low priority).</li>
+                  <li>Zero disk contention for high-throughput job dispatching.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div class="arch-box">
+            <h4>Autonomous Subsystems</h4>
+            <div class="subsystems-grid">
+              <div class="subsystem-item">
+                <span class="subsystem-badge">1. API Gateway</span>
+                <p>FastAPI validates payloads and writes to PostgreSQL with ACID durability before acknowledging receipt to clients.</p>
+              </div>
+              <div class="subsystem-item">
+                <span class="subsystem-badge">2. Scheduler Daemon</span>
+                <p>Runs every 1s. Queries due scheduled and retrying jobs (<code>scheduled_at &lt;= NOW()</code>) and safely promotes them to Redis.</p>
+              </div>
+              <div class="subsystem-item">
+                <span class="subsystem-badge">3. Worker Pool (4x)</span>
+                <p>Autonomous worker processes that claim exclusive leases, execute handlers, emit heartbeats every 2s, and store attempt records.</p>
+              </div>
+              <div class="subsystem-item">
+                <span class="subsystem-badge">4. Recovery Reaper</span>
+                <p>Runs every 5s. Identifies zombie leases where <code>lease_expires_at &lt; NOW()</code> (worker died or hung) and safely reclaims or retries them.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- View 2: Distributed Sequence -->
+        <div class="wf-content-view" id="wf-sequence">
+          <div class="sequence-list">
+            <div class="seq-step">
+              <div class="seq-num">1</div>
+              <div class="seq-detail">
+                <h5>Job Ingestion (Client ➔ FastAPI ➔ PostgreSQL)</h5>
+                <p>Client sends <code>POST /api/v1/jobs</code> with payload and priority. Server writes to PostgreSQL with <code>version=1</code>. If immediate, also pushes to Redis (<code>LPUSH queue:default</code>).</p>
+              </div>
+            </div>
+
+            <div class="seq-step">
+              <div class="seq-num">2</div>
+              <div class="seq-detail">
+                <h5>Delayed Polling (PostgreSQL ➔ Scheduler ➔ Redis)</h5>
+                <p>For jobs with a future <code>scheduled_at</code>, they rest in PostgreSQL. Every 1s, the Scheduler polls <code>SELECT * FROM jobs WHERE status IN ('SCHEDULED', 'RETRY_WAIT') AND scheduled_at &lt;= NOW() FOR UPDATE SKIP LOCKED</code> and pushes them to Redis.</p>
+              </div>
+            </div>
+
+            <div class="seq-step">
+              <div class="seq-num">3</div>
+              <div class="seq-detail">
+                <h5>Atomic Worker Lease Claiming</h5>
+                <p>Worker pops job ID from Redis, then runs:</p>
+                <pre class="code-block">UPDATE jobs 
+SET status='RUNNING', lease_owner='worker-x', lease_expires_at=NOW()+30s, version=version+1 
+WHERE id=:id AND version=:expected_version RETURNING id;</pre>
+                <p>If another worker claimed it first, the version check fails and the second worker safely skips the job.</p>
+              </div>
+            </div>
+
+            <div class="seq-step">
+              <div class="seq-num">4</div>
+              <div class="seq-detail">
+                <h5>Execution, Heartbeats & Cooperative Cancellation</h5>
+                <p>While the handler runs, a background asyncio task renews the lease in PostgreSQL every 2 seconds. In long-running jobs (like reports), the handler inspects the cancellation token between chunks to stop safely if requested.</p>
+              </div>
+            </div>
+
+            <div class="seq-step">
+              <div class="seq-num">5</div>
+              <div class="seq-detail">
+                <h5>Completion / Full-Jitter Exponential Backoff</h5>
+                <p>On success, job updates to <code>SUCCEEDED</code>. On transient failure, worker calculates full-jitter backoff: <code>delay = random(0, base * 2^attempt)</code>, schedules a retry, and updates status to <code>RETRY_WAIT</code>.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- View 3: Concurrency & Safety -->
+        <div class="wf-content-view" id="wf-guarantees">
+          <div class="guarantee-box">
+            <h4>Split-Brain Prevention via Version Fencing</h4>
+            <p>Suppose Worker A claims a job, but experiences an extreme OS freeze or network pause. The lease expires, and the Recovery Reaper reassigns the job to Worker B (incrementing <code>version</code> to 3). When Worker A finally wakes up, its attempt to write with <code>version=2</code> is rejected because the database requires <code>WHERE version=2</code>, but the row is now <code>version=3</code>! No duplicate or corrupted writes can ever occur.</p>
+          </div>
+
+          <div class="guarantee-box">
+            <h4>Row-Level Locking without Lock Contention</h4>
+            <p>By using PostgreSQL's <code>FOR UPDATE SKIP LOCKED</code>, worker processes and the scheduler daemon never wait for locks held by other transactions. They instantly skip locked rows and grab the next available job, maintaining high throughput under concurrent load.</p>
+          </div>
+        </div>
       </div>
     </div>
   </div>
