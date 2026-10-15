@@ -1,9 +1,11 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import health, jobs, metrics
 from app.core.config import get_settings
@@ -84,8 +86,17 @@ def create_application() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(metrics.router)
 
+    # Static Assets & Frontend Dashboard
+    static_dir = Path(__file__).parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
     @app.get("/", include_in_schema=False)
-    async def root() -> dict[str, str]:
+    @app.get("/dashboard", include_in_schema=False)
+    async def dashboard():
+        index_file = static_dir / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
         return {
             "name": settings.APP_NAME,
             "version": "0.1.0",

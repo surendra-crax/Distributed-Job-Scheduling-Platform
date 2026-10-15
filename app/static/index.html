@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mission Control — Distributed Job Scheduling Platform</title>
+  <meta name="description" content="Real-time distributed job execution, scheduling, worker leasing, and failure recovery mission control.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <!-- Header & Live System Status -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-group">
+        <div class="logo-icon">⚡</div>
+        <div>
+          <h1 class="logo-title">Distributed Job Scheduler</h1>
+          <p class="logo-subtitle">Mission Control • Durable State Engine</p>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Cluster Topology Health Pills -->
+    <div class="cluster-status-bar">
+      <div class="status-pill" id="pill-postgres">
+        <span class="status-dot"></span>
+        <span class="status-label">PostgreSQL:</span>
+        <span class="status-val" id="val-postgres">Checking...</span>
+      </div>
+      <div class="status-pill" id="pill-redis">
+        <span class="status-dot"></span>
+        <span class="status-label">Redis Buffer:</span>
+        <span class="status-val" id="val-redis">Checking...</span>
+      </div>
+      <div class="status-pill" id="pill-scheduler">
+        <span class="status-dot"></span>
+        <span class="status-label">Scheduler:</span>
+        <span class="status-val">Active (1s tick)</span>
+      </div>
+      <div class="status-pill" id="pill-workers">
+        <span class="status-dot"></span>
+        <span class="status-label">Worker Pool:</span>
+        <span class="status-val">4 Slots Active</span>
+      </div>
+      <div class="status-pill" id="pill-recovery">
+        <span class="status-dot"></span>
+        <span class="status-label">Recovery Reaper:</span>
+        <span class="status-val">Armed</span>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="auto-refresh-control">
+        <label class="switch">
+          <input type="checkbox" id="toggle-autorefresh" checked>
+          <span class="slider round"></span>
+        </label>
+        <span class="switch-label">Live Stream</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="btn-refresh" title="Force Refresh">↻ Refresh</button>
+      <a href="/docs" target="_blank" class="btn btn-outline btn-sm">API Docs ↗</a>
+    </div>
+  </header>
+
+  <main class="dashboard-container">
+    <!-- Top KPI Stat Cards -->
+    <section class="kpi-grid">
+      <div class="kpi-card glow-cyan">
+        <div class="kpi-header">
+          <span class="kpi-title">Ready Queue (Redis)</span>
+          <span class="kpi-badge">Dispatch Buffer</span>
+        </div>
+        <div class="kpi-value" id="kpi-queue-depth">0</div>
+        <div class="kpi-footer">Ephemeral prioritization queue</div>
+      </div>
+
+      <div class="kpi-card glow-blue">
+        <div class="kpi-header">
+          <span class="kpi-title">Running / Claimed</span>
+          <span class="kpi-badge">Active Leases</span>
+        </div>
+        <div class="kpi-value" id="kpi-running">0</div>
+        <div class="kpi-footer">Lease-locked with fencing tokens</div>
+      </div>
+
+      <div class="kpi-card glow-amber">
+        <div class="kpi-header">
+          <span class="kpi-title">Scheduled & Retrying</span>
+          <span class="kpi-badge">Due Queue</span>
+        </div>
+        <div class="kpi-value" id="kpi-scheduled-retrying">0</div>
+        <div class="kpi-footer">Polling with FOR UPDATE SKIP LOCKED</div>
+      </div>
+
+      <div class="kpi-card glow-emerald">
+        <div class="kpi-header">
+          <span class="kpi-title">Completed (Success)</span>
+          <span class="kpi-badge">Durable</span>
+        </div>
+        <div class="kpi-value" id="kpi-succeeded">0</div>
+        <div class="kpi-footer">Audit history in PostgreSQL</div>
+      </div>
+
+      <div class="kpi-card glow-rose">
+        <div class="kpi-header">
+          <span class="kpi-title">Terminal Failures</span>
+          <span class="kpi-badge">Exhausted</span>
+        </div>
+        <div class="kpi-value" id="kpi-failed">0</div>
+        <div class="kpi-footer">Permanent errors or max attempts</div>
+      </div>
+
+      <div class="kpi-card glow-purple">
+        <div class="kpi-header">
+          <span class="kpi-title">Avg Execution Time</span>
+          <span class="kpi-badge">Latency</span>
+        </div>
+        <div class="kpi-value" id="kpi-avg-duration">0.0 ms</div>
+        <div class="kpi-footer">Recorded per JobAttempt</div>
+      </div>
+    </section>
+
+    <!-- Distributed State Lifecycle Flow Banner -->
+    <section class="lifecycle-banner">
+      <div class="lifecycle-title">Distributed Job State Machine Pipeline</div>
+      <div class="lifecycle-stages">
+        <div class="stage-node" id="stage-scheduled">
+          <div class="stage-icon">⏱️</div>
+          <div class="stage-name">SCHEDULED</div>
+          <div class="stage-count" id="count-scheduled">0</div>
+        </div>
+        <div class="stage-arrow">➔</div>
+        <div class="stage-node" id="stage-queued">
+          <div class="stage-icon">📥</div>
+          <div class="stage-name">QUEUED</div>
+          <div class="stage-count" id="count-queued">0</div>
+        </div>
+        <div class="stage-arrow">➔</div>
+        <div class="stage-node" id="stage-running">
+          <div class="stage-icon">⚡</div>
+          <div class="stage-name">RUNNING</div>
+          <div class="stage-count" id="count-running">0</div>
+        </div>
+        <div class="stage-arrow">➔</div>
+        <div class="stage-outcomes">
+          <div class="outcome-pill outcome-success">
+            <span>✅ SUCCEEDED</span>
+            <span class="outcome-count" id="count-succeeded">0</span>
+          </div>
+          <div class="outcome-pill outcome-retry">
+            <span>🔄 RETRY_WAIT</span>
+            <span class="outcome-count" id="count-retry">0</span>
+          </div>
+          <div class="outcome-pill outcome-fail">
+            <span>❌ FAILED</span>
+            <span class="outcome-count" id="count-failed">0</span>
+          </div>
+          <div class="outcome-pill outcome-cancel">
+            <span>🚫 CANCELLED</span>
+            <span class="outcome-count" id="count-cancelled">0</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Interactive Grid: Job Dispatch Studio & Fast Scenario Launcher -->
+    <div class="studio-grid">
+      <!-- 1-Click Interactive Test Scenarios -->
+      <section class="panel panel-scenarios">
+        <div class="panel-header">
+          <h2>⚡ Real-World Test Scenarios</h2>
+          <span class="panel-tag">1-Click Live Demonstrations</span>
+        </div>
+        <p class="panel-desc">Click any scenario to immediately trigger distributed behaviors and watch workers, schedulers, and reapers respond live.</p>
+
+        <div class="scenario-buttons-grid">
+          <button class="scenario-btn" id="scenario-immediate">
+            <div class="scenario-icon">🚀</div>
+            <div class="scenario-info">
+              <div class="scenario-title">Immediate Math Calculation</div>
+              <div class="scenario-sub">Priority 90 • Fibonacci sequence n=35</div>
+            </div>
+          </button>
+
+          <button class="scenario-btn" id="scenario-scheduled">
+            <div class="scenario-icon">⏱️</div>
+            <div class="scenario-info">
+              <div class="scenario-title">Schedule Future Job (+8s)</div>
+              <div class="scenario-sub">Watch Scheduler pick up due job in 8 seconds</div>
+            </div>
+          </button>
+
+          <button class="scenario-btn" id="scenario-retry">
+            <div class="scenario-icon">🔄</div>
+            <div class="scenario-info">
+              <div class="scenario-title">Transient Failure & Backoff</div>
+              <div class="scenario-sub">Simulates network blip • Retries with jitter</div>
+            </div>
+          </button>
+
+          <button class="scenario-btn" id="scenario-cancel">
+            <div class="scenario-icon">🛑</div>
+            <div class="scenario-info">
+              <div class="scenario-title">Cooperative Cancellation</div>
+              <div class="scenario-sub">Dispatches long job & broadcasts abort token</div>
+            </div>
+          </button>
+
+          <button class="scenario-btn" id="scenario-burst">
+            <div class="scenario-icon">💥</div>
+            <div class="scenario-info">
+              <div class="scenario-title">Fire 10 Concurrent Jobs</div>
+              <div class="scenario-sub">Watch 4 workers partition work simultaneously</div>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- Custom Job Dispatch Studio Form -->
+      <section class="panel panel-dispatch">
+        <div class="panel-header">
+          <h2>🛠️ Custom Job Dispatch Studio</h2>
+          <span class="panel-tag">Custom Payload</span>
+        </div>
+        
+        <form id="job-dispatch-form">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="select-job-type">Registered Job Handler</label>
+              <select id="select-job-type" class="form-control">
+                <option value="math.calculate">🧮 math.calculate (Deterministic Math)</option>
+                <option value="notification.simulate">🔔 notification.simulate (Transient Fault Simulator)</option>
+                <option value="report.generate">📊 report.generate (Bounded Report Task)</option>
+              </select>
+            </div>
+
+            <div class="form-group flex-1">
+              <label for="input-priority">Priority (1 = Low, 100 = Urgent): <span id="priority-badge">75</span></label>
+              <input type="range" id="input-priority" min="1" max="100" value="75" class="form-range">
+            </div>
+          </div>
+
+          <!-- Dynamic Payload Inputs based on Job Type -->
+          <div id="payload-fields-container">
+            <!-- Rendered by dashboard.js -->
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="input-delay-seconds">Execution Timing</label>
+              <select id="input-delay-seconds" class="form-control">
+                <option value="0">Execute Immediately</option>
+                <option value="5">Schedule in +5 seconds</option>
+                <option value="15">Schedule in +15 seconds</option>
+                <option value="30">Schedule in +30 seconds</option>
+              </select>
+            </div>
+
+            <div class="form-group flex-1">
+              <label for="input-max-attempts">Max Attempts</label>
+              <input type="number" id="input-max-attempts" value="3" min="1" max="10" class="form-control">
+            </div>
+
+            <div class="form-group flex-1">
+              <label for="input-timeout">Timeout (s)</label>
+              <input type="number" id="input-timeout" value="60" min="1" max="3600" class="form-control">
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block" id="btn-submit-job">
+            <span>⚡ Dispatch Job to Cluster</span>
+          </button>
+        </form>
+      </section>
+    </div>
+
+    <!-- Real-time Jobs Stream & Inspector Table -->
+    <section class="panel panel-jobs">
+      <div class="panel-header table-controls">
+        <div class="table-title-group">
+          <h2>📋 Live Job Registry</h2>
+          <span class="job-count-badge" id="table-total-count">0 Jobs Loaded</span>
+        </div>
+        
+        <div class="filter-group">
+          <input type="text" id="filter-search" placeholder="Filter by Job ID or Type..." class="form-control form-control-sm">
+          <select id="filter-status" class="form-control form-control-sm">
+            <option value="">All Statuses</option>
+            <option value="QUEUED">QUEUED</option>
+            <option value="RUNNING">RUNNING</option>
+            <option value="SCHEDULED">SCHEDULED</option>
+            <option value="RETRY_WAIT">RETRY_WAIT</option>
+            <option value="SUCCEEDED">SUCCEEDED</option>
+            <option value="FAILED">FAILED</option>
+            <option value="CANCELLED">CANCELLED</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="jobs-table">
+          <thead>
+            <tr>
+              <th>Job ID</th>
+              <th>Handler Type</th>
+              <th>Priority</th>
+              <th>Status</th>
+              <th>Attempts</th>
+              <th>Scheduled / Age</th>
+              <th>Fencing Version</th>
+              <th class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-table-body">
+            <tr>
+              <td colspan="8" class="text-center text-muted py-8">Connecting to database and streaming jobs...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Job Inspection Modal -->
+  <div class="modal-backdrop" id="job-modal-backdrop">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3 id="modal-title">Job Inspection</h3>
+          <p class="modal-subtitle" id="modal-subtitle">Loading...</p>
+        </div>
+        <button class="modal-close-btn" id="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="modal-section">
+          <h4>Job Metadata</h4>
+          <div class="meta-grid" id="modal-meta-grid">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <div class="modal-section">
+          <h4>Input Payload</h4>
+          <pre class="code-block" id="modal-payload">{}</pre>
+        </div>
+
+        <div class="modal-section" id="modal-result-section">
+          <h4>Execution Result / Output</h4>
+          <pre class="code-block code-success" id="modal-result">None</pre>
+        </div>
+
+        <div class="modal-section" id="modal-error-section" style="display:none;">
+          <h4>Last Failure Details</h4>
+          <pre class="code-block code-danger" id="modal-error">None</pre>
+        </div>
+
+        <div class="modal-section">
+          <h4>Execution Attempts Audit Log</h4>
+          <div class="attempts-timeline" id="modal-attempts-container">
+            <p class="text-muted">No attempt history recorded yet.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer" id="modal-footer-actions">
+        <!-- Action buttons rendered dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
