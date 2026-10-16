@@ -42,11 +42,12 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
+COPY entrypoint.sh ./
 
-RUN chown -R appuser:appgroup /app
+RUN chmod +x /app/entrypoint.sh && chown -R appuser:appgroup /app
 USER appuser
 
 EXPOSE 8000
 
-# Default command runs API server
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default entrypoint runs auto-migrations and starts services
+ENTRYPOINT ["/app/entrypoint.sh"]

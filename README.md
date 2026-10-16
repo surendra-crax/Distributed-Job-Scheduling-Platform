@@ -291,6 +291,7 @@ python tests/benchmark_concurrency.py
 - [Detailed Architecture Specification](docs/architecture.md)
 - [Failure Modes & Recovery Guide](docs/failure-recovery.md)
 - [REST API Reference & Curl Examples](docs/api-examples.md)
+- [Render Cloud Deployment Guide](docs/RENDER_DEPLOYMENT.md)
 
 ---
 
