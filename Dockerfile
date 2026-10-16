@@ -32,7 +32,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     redis-server \
     postgresql \
     postgresql-client \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && for bin in /usr/lib/postgresql/*/bin/*; do \
+        ln -sf "$bin" "/usr/local/bin/$(basename "$bin")" 2>/dev/null || true; \
+    done
 
 # Create non-root user
 RUN groupadd -g 1000 appgroup && \

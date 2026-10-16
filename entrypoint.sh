@@ -7,6 +7,13 @@ echo "Mode: ${MODE:-all-in-one}"
 echo "Environment: ${ENVIRONMENT:-production}"
 echo "=========================================================="
 
+# Ensure PostgreSQL server binaries are in PATH
+for pgbindir in /usr/lib/postgresql/*/bin /usr/local/pgsql/bin; do
+    if [ -d "$pgbindir" ]; then
+        export PATH="$pgbindir:$PATH"
+    fi
+done
+
 # 1. Embedded Redis Initialization (Runs 100% on Render without external Redis)
 if [ -z "${REDIS_URL}" ] || echo "${REDIS_URL}" | grep -qE "localhost|127\.0\.0\.1"; then
     echo "⚡ No external REDIS_URL provided. Starting high-speed embedded Redis server..."
@@ -33,22 +40,45 @@ fi
 if [ "${USE_EMBEDDED_PG}" = "true" ]; then
     echo "⚡ No external DATABASE_URL provided. Starting embedded PostgreSQL server..."
     export PGDATA="/app/data/pgdata"
-    if [ ! -d "${PGDATA}" ] || [ ! -f "${PGDATA}/PG_VERSION" ]; then
-        echo "  Initializing embedded PostgreSQL database cluster in ${PGDATA}..."
-        mkdir -p "${PGDATA}"
-        initdb -D "${PGDATA}" --auth=trust -U postgres --encoding=UTF8
+    
+    # Locate initdb, pg_ctl, psql, pg_isready
+    INITDB_BIN="initdb"
+    if ! command -v initdb >/dev/null 2>&1; then
+        INITDB_BIN=$(find /usr -name initdb -type f -perm /111 2>/dev/null | head -n 1)
+        if [ -n "$INITDB_BIN" ]; then
+            export PATH="$(dirname "$INITDB_BIN"):$PATH"
+        fi
     fi
+
+    PG_CTL_BIN="pg_ctl"
+    PSQL_BIN="psql"
+    PG_ISREADY_BIN="pg_isready"
+
+    if [ ! -f "${PGDATA}/PG_VERSION" ]; then
+        echo "  Initializing embedded PostgreSQL database cluster in ${PGDATA}..."
+        mkdir -p /app/data
+        rm -rf "${PGDATA}"
+        "${INITDB_BIN}" -D "${PGDATA}" --auth=trust -U postgres --encoding=UTF8
+    fi
+
     echo "  Starting embedded PostgreSQL daemon..."
-    pg_ctl -D "${PGDATA}" -l /tmp/postgres.log -o "-p 5432 -h 127.0.0.1" start
+    "${PG_CTL_BIN}" -D "${PGDATA}" -l /tmp/postgres.log -o "-p 5432 -h 127.0.0.1 -k /tmp" start
     
     echo "  Waiting for PostgreSQL to accept connections..."
-    until pg_isready -h 127.0.0.1 -p 5432 -U postgres -q 2>/dev/null; do
+    TRIES=0
+    until "${PG_ISREADY_BIN}" -h 127.0.0.1 -p 5432 -U postgres -q 2>/dev/null; do
+        TRIES=$((TRIES + 1))
+        if [ $TRIES -ge 30 ]; then
+            echo "❌ Embedded PostgreSQL failed to start after 15s. Log output:"
+            cat /tmp/postgres.log 2>/dev/null || true
+            exit 1
+        fi
         sleep 0.5
     done
     
     # Create job_scheduler database if it does not already exist
-    psql -h 127.0.0.1 -p 5432 -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'job_scheduler'" | grep -q 1 || \
-        psql -h 127.0.0.1 -p 5432 -U postgres -c "CREATE DATABASE job_scheduler;"
+    "${PSQL_BIN}" -h 127.0.0.1 -p 5432 -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'job_scheduler'" | grep -q 1 || \
+        "${PSQL_BIN}" -h 127.0.0.1 -p 5432 -U postgres -c "CREATE DATABASE job_scheduler;"
 
     export DATABASE_URL="postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/job_scheduler"
     export DATABASE_SYNC_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/job_scheduler"
