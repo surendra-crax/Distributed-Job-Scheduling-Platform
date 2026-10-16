@@ -7,7 +7,19 @@ echo "Mode: ${MODE:-all-in-one}"
 echo "Environment: ${ENVIRONMENT:-production}"
 echo "=========================================================="
 
-# 1. Run Alembic Database Migrations
+# 1. Embedded Redis Initialization (Runs 100% on Render without external Redis)
+if [ -z "${REDIS_URL}" ] || echo "${REDIS_URL}" | grep -qE "localhost|127\.0\.0\.1"; then
+    echo "⚡ No external REDIS_URL provided. Starting high-speed embedded Redis server..."
+    redis-server --daemonize yes --bind 127.0.0.1 --port 6379 --dir /tmp --save "" --appendonly no --protected-mode no
+    export REDIS_URL="redis://127.0.0.1:6379/0"
+    export REDIS_HOST="127.0.0.1"
+    export REDIS_PORT="6379"
+    echo "✅ Embedded Redis server active on 127.0.0.1:6379 (Zero external setup required)."
+else
+    echo "🔗 Using external Redis cluster: ${REDIS_URL}"
+fi
+
+# 2. Run Alembic Database Migrations
 echo "🔄 Checking and applying database migrations..."
 alembic upgrade head
 echo "✅ Database schema up to date."

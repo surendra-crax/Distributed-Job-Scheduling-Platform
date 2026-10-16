@@ -21,8 +21,6 @@ services:
         fromDatabase:
           name: job-scheduler-db
           property: connectionString
-      - key: REDIS_URL
-        sync: false # Set in Render Dashboard or Upstash free Redis
       - key: WORKER_CONCURRENCY
         value: "4"
       - key: SCHEDULER_POLL_INTERVAL_SECONDS

@@ -35,6 +35,12 @@ The container automatically:
 
 ---
 
+> 💡 **Do you need an external Redis account? NO!**
+> The Docker container automatically starts an **embedded, in-memory Redis instance** inside the container on `127.0.0.1:6379` if no external `REDIS_URL` is provided. 
+> You only need **Render's Free Web Service + Render's Free PostgreSQL Database**. Zero extra subscriptions or external accounts required!
+
+---
+
 ## ⚡ Method 1: 1-Click Blueprint Deployment (Recommended)
 
 Render Blueprints use the included [`render.yaml`](../render.yaml) file to automatically provision the database and web service.
@@ -45,19 +51,16 @@ Render Blueprints use the included [`render.yaml`](../render.yaml) file to autom
 3. Connect your GitHub account and select your repository:
    **`surendra-crax/Distributed-Job-Scheduling-Platform`**
 
-### Step 2: Configure Blueprint
-1. Render will read `render.yaml` and propose:
+### Step 2: Apply Blueprint
+1. Render will read `render.yaml` and configure:
    - **Web Service**: `job-scheduler-platform` (Docker)
-   - **PostgreSQL Database**: `job-scheduler-db`
-2. Enter your **`REDIS_URL`**:
-   - You can get a free, permanent Redis instance in 30 seconds at [Upstash](https://upstash.com/) (select **Redis** ➔ **Create Database** ➔ Copy the `redis://...` connection string).
-   - Alternatively, create a Render Redis instance.
-3. Click **Apply**.
-4. Render will provision the database, build the Docker container, run migrations, and launch the platform!
+   - **PostgreSQL Database**: `job-scheduler-db` (Free Managed Database)
+2. Click **Apply**.
+3. Render will provision the PostgreSQL database, build the container, automatically start embedded Redis, apply migrations, and launch the platform!
 
 ---
 
-## 🛠️ Method 2: Manual Web Service Setup
+## 🛠️ Method 2: Manual Web Service Setup (Render Only)
 
 If you prefer setting up services manually via the Render dashboard:
 
@@ -90,7 +93,7 @@ If you prefer setting up services manually via the Render dashboard:
 | :--- | :--- | :--- |
 | `ENVIRONMENT` | `production` | Enables production pooling & error masking |
 | `DATABASE_URL` | *Paste Internal Postgres URL* | Automatically normalized to `postgresql+asyncpg://` |
-| `REDIS_URL` | *Paste Redis connection string* | Used for ephemeral dispatch queues |
+| `REDIS_URL` | *(Optional) Leave blank!* | Container automatically starts embedded Redis if empty |
 | `WORKER_CONCURRENCY` | `4` | Number of worker processes to spawn |
 | `SCHEDULER_POLL_INTERVAL_SECONDS` | `1.0` | Frequency of due job polling |
 | `RECOVERY_POLL_INTERVAL_SECONDS` | `10.0` | Frequency of zombie lease reaping |
