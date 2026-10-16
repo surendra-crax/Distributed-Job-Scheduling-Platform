@@ -24,12 +24,14 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/usr/local/bin:$PATH"
+    PATH="/usr/lib/postgresql/16/bin:/usr/lib/postgresql/15/bin:/usr/local/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
     redis-server \
+    postgresql \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -45,7 +47,9 @@ COPY alembic ./alembic
 COPY app ./app
 COPY entrypoint.sh ./
 
-RUN chmod +x /app/entrypoint.sh && chown -R appuser:appgroup /app
+RUN mkdir -p /app/data /var/run/postgresql && \
+    chmod +x /app/entrypoint.sh && \
+    chown -R appuser:appgroup /app /var/run/postgresql
 USER appuser
 
 EXPOSE 8000

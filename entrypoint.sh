@@ -19,7 +19,65 @@ else
     echo "🔗 Using external Redis cluster: ${REDIS_URL}"
 fi
 
-# 2. Run Alembic Database Migrations
+# 2. Database Detection, Embedded Startup & Readiness Verification
+USE_EMBEDDED_PG=false
+
+if [ -z "${DATABASE_URL}" ]; then
+    USE_EMBEDDED_PG=true
+elif echo "${DATABASE_URL}" | grep -qE "localhost|127\.0\.0\.1"; then
+    if ! pg_isready -h 127.0.0.1 -p 5432 -q 2>/dev/null; then
+        USE_EMBEDDED_PG=true
+    fi
+fi
+
+if [ "${USE_EMBEDDED_PG}" = "true" ]; then
+    echo "⚡ No external DATABASE_URL provided. Starting embedded PostgreSQL server..."
+    export PGDATA="/app/data/pgdata"
+    if [ ! -d "${PGDATA}" ] || [ ! -f "${PGDATA}/PG_VERSION" ]; then
+        echo "  Initializing embedded PostgreSQL database cluster in ${PGDATA}..."
+        mkdir -p "${PGDATA}"
+        initdb -D "${PGDATA}" --auth=trust -U postgres --encoding=UTF8
+    fi
+    echo "  Starting embedded PostgreSQL daemon..."
+    pg_ctl -D "${PGDATA}" -l /tmp/postgres.log -o "-p 5432 -h 127.0.0.1" start
+    
+    echo "  Waiting for PostgreSQL to accept connections..."
+    until pg_isready -h 127.0.0.1 -p 5432 -U postgres -q 2>/dev/null; do
+        sleep 0.5
+    done
+    
+    # Create job_scheduler database if it does not already exist
+    psql -h 127.0.0.1 -p 5432 -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'job_scheduler'" | grep -q 1 || \
+        psql -h 127.0.0.1 -p 5432 -U postgres -c "CREATE DATABASE job_scheduler;"
+
+    export DATABASE_URL="postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/job_scheduler"
+    export DATABASE_SYNC_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:5432/job_scheduler"
+    echo "✅ Embedded PostgreSQL server ready on 127.0.0.1:5432 (Zero external setup required)."
+else
+    echo "🔗 External DATABASE_URL detected: ${DATABASE_URL}"
+    echo "  Waiting for PostgreSQL database to be reachable..."
+    python3 -c "
+import sys, time
+from sqlalchemy import create_engine, text
+from app.core.config import get_settings
+
+sync_url = get_settings().sync_database_url
+for attempt in range(1, 31):
+    try:
+        engine = create_engine(sync_url, pool_pre_ping=True, connect_args={'connect_timeout': 3})
+        with engine.connect() as conn:
+            conn.execute(text('SELECT 1'))
+        print('  ✅ External PostgreSQL is reachable and ready.')
+        sys.exit(0)
+    except Exception as e:
+        print(f'  [Attempt {attempt}/30] Database not ready yet ({e}). Waiting 2s...')
+        time.sleep(2)
+print('❌ Could not connect to PostgreSQL within 60 seconds.')
+sys.exit(1)
+"
+fi
+
+# 3. Run Alembic Database Migrations
 echo "🔄 Checking and applying database migrations..."
 alembic upgrade head
 echo "✅ Database schema up to date."
